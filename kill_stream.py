@@ -48,7 +48,6 @@ Tautulli > Settings > Notification Agents > New Script > Script Arguments:
 from __future__ import print_function
 from __future__ import unicode_literals
 
-
 from builtins import object
 from builtins import str
 import os
@@ -62,7 +61,6 @@ from requests import get as get_request
 from requests import Session
 from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException
-
 
 TAUTULLI_URL = ''
 TAUTULLI_APIKEY = ''
@@ -82,7 +80,6 @@ else:
 SUBJECT_TEXT = "Tautulli has killed a stream."
 BODY_TEXT = "Killed session ID '{id}'. Reason: {message}"
 BODY_TEXT_USER = "Killed {user}'s stream. Reason: {message}."
-
 
 SELECTOR = ['stream', 'allStreams', 'paused']
 
@@ -316,15 +313,14 @@ class Stream(object):
 
 
 def discord_notify(webhook_url, json_payload):
-    response = requests.post(webhook_url, json=json_payload)
-    print(response)
+    requests.post(webhook_url, json=json_payload)
 
 
 def get_ip_info(ip_address):
     return get_request(f'http://ip-api.com/json/{ip_address}').json()
 
 
-def store_ip_info(server):
+def handle_duplicate_streams(server):
     def new_ip_address(ip):
         ip_info = get_ip_info(ip)
         if ip_info["status"] == "fail":
@@ -344,6 +340,7 @@ def store_ip_info(server):
             },
             "isp": ip_info["isp"]
         }
+
     streams = get_all_streams(server)
     duplicate_streams = {}
     unique_names = []
@@ -358,7 +355,7 @@ def store_ip_info(server):
             duplicate_streams[stream.username] = [stream]
     duplicate_streams = {name: streams for name, streams in duplicate_streams.items() if len(streams) > 1}
 
-    # See if the streams are actually duplicates, or if the IP's are the same
+    # See if the streams are actually duplicates, or if the IPs are the same
     for user in duplicate_streams.copy().keys():
         unique_ips = []
         for index, stream in enumerate(duplicate_streams[user]):
@@ -383,9 +380,11 @@ def store_ip_info(server):
             locations = []
             for i in range(len(notify_stream_info[user])):
                 ip_info = get_ip_info(notify_stream_info[user][i])
-                ip_location = [ip_info["regionName"], ip_info["city"]] if ip_info["status"] != "fail" else ["Unknown", "Unknown"]
+                ip_location = [ip_info["regionName"], ip_info["city"]] if ip_info["status"] != "fail" else ["Unknown",
+                                                                                                            "Unknown"]
                 # Add location info to the ip string, safe now that we are done with it...
-                notify_stream_info[user][i] = f"{notify_stream_info[user][i]}: {ip_location[0]}, {ip_location[1]}"
+                notify_stream_info[user][i] = {
+                    notify_stream_info[user][i]: {"state": ip_location[0], "city": ip_location[1]}}
                 if ip_location in locations:
                     continue
                 else:
@@ -394,20 +393,21 @@ def store_ip_info(server):
             # Check if all locations are the same. If they are, continue to log but do not notify on discord
             if all(i == locations[0] for i in locations):
                 keys_to_remove.append(user)
+
         # Now, remove the keys that need to be deleted
         for user in keys_to_remove:
             del notify_stream_info[user]
-        notify_stream_info = duplicate_stream_info
         if notify_stream_info:
             def pretty_discord(data):
                 pretty_data = []
-                for name, locations in data.items():
+                for name, ips in data.items():
                     location_list = ""
-                    for index, location in enumerate(locations):
-                        if index == len(locations) - 1:
-                            location_list += f"- {location.split(': ')[1]}"
+                    for index, ip in enumerate(ips):
+                        location = list(ip.values())[0]
+                        if index == len(ips) - 1:
+                            location_list += f"- {location['city']}, {location['state']}"
                         else:
-                            location_list += f"- {location.split(': ')[1]}\n"
+                            location_list += f"- {location['city']}, {location['state']}\n"
                     pretty_data.append(
                         {
                             "name": name,
@@ -436,20 +436,23 @@ def store_ip_info(server):
 
     with open("concurrent_ips.json") as f:
         stored_data = json.load(f)
-    for user in duplicate_stream_info.keys():
+    for user, ip_list in duplicate_stream_info.items():
         if user in stored_data:
             stored_data[user]["offenses"] += 1
-            for ip_address in duplicate_stream_info[user]:
+            for ip_dict in ip_list:
+                ip_address = list(ip_dict.keys())[0]  # Extracting IP address
                 if ip_address in stored_data[user]["ip_addresses"]:
                     stored_data[user]["ip_addresses"][ip_address]["count"] += 1
                 else:
                     stored_data[user]["ip_addresses"][ip_address] = new_ip_address(ip_address)
         else:
             stored_data[user] = {"offenses": 1, "ip_addresses": {}}
-            for ip_address in duplicate_stream_info[user]:
+            for ip_dict in ip_list:
+                ip_address = list(ip_dict.keys())[0]  # Extracting IP address
                 stored_data[user]["ip_addresses"][ip_address] = new_ip_address(ip_address)
-        with open("concurrent_ips.json", "w") as outfile:
-            json.dump(stored_data, outfile, indent=4)
+    with open("concurrent_ips.json", "w") as outfile:
+        json.dump(stored_data, outfile, indent=4)
+    print("Done!")
 
 
 if __name__ == "__main__":
@@ -502,15 +505,14 @@ if __name__ == "__main__":
 
     if opts.jbop == 'stream':
         tautulli_stream.terminate(kill_message)
-        notify(opts, kill_message, 'Stream', tautulli_stream, tautulli_server)
 
     elif opts.jbop == 'allStreams':
         all_streams = get_all_streams(tautulli_server, opts.userId)
 
-        # Store concurrent stream IP info
         try:
-            store_ip_info(tautulli_server)
+            handle_duplicate_streams(tautulli_server)
         except Exception as e:
+            print(f"Exception: {e}")
             discord_notify(opts.webhook, f"Kill Stream Error: {str(e)}")
 
         for a_stream in all_streams:
@@ -518,5 +520,3 @@ if __name__ == "__main__":
 
     elif opts.jbop == 'paused':
         killed_stream = tautulli_stream.terminate_long_pause(kill_message, opts.limit, opts.interval)
-        if killed_stream:
-            notify(opts, kill_message, 'Paused', tautulli_stream, tautulli_server)
