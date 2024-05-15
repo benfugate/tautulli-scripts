@@ -86,21 +86,6 @@ SELECTOR = ['stream', 'allStreams', 'paused']
 TAUTULLI_ICON = 'https://github.com/Tautulli/Tautulli/raw/master/data/interfaces/default/images/logo-circle.png'
 
 
-def utc_now_iso():
-    """Get current time in ISO format"""
-    utcnow = datetime.utcnow()
-
-    return utcnow.isoformat()
-
-
-def hex_to_int(value):
-    """Convert hex value to integer"""
-    try:
-        return int(value, 16)
-    except (ValueError, TypeError):
-        return 0
-
-
 def arg_decoding(arg):
     """Decode args, encode UTF-8"""
     if sys.version_info[0] < 3:
@@ -320,26 +305,7 @@ def get_ip_info(ip_address):
     return get_request(f'http://ip-api.com/json/{ip_address}').json()
 
 
-def handle_duplicate_streams(server):
-    def new_ip_address(ip):
-        ip_info = get_ip_info(ip)
-        if ip_info["status"] == "fail":
-            return {
-                "count": 1,
-                "location": {
-                    "state": "Unknown",
-                    "city": "Unknown"
-                },
-                "isp": "Unknown"
-            }
-        return {
-            "count": 1,
-            "location": {
-                "state": ip_info["regionName"],
-                "city": ip_info["city"]
-            },
-            "isp": ip_info["isp"]
-        }
+def find_duplicate_streams(server):
 
     streams = get_all_streams(server)
     duplicate_streams = {}
@@ -366,74 +332,40 @@ def handle_duplicate_streams(server):
                 if len(duplicate_streams[user]) <= 1:
                     del duplicate_streams[user]
 
+    duplicate_stream_info = {}
     if duplicate_streams:
-        duplicate_stream_info = {}
         for user in duplicate_streams.keys():
             duplicate_stream_info[user] = []
             for index, stream in enumerate(duplicate_streams[user]):
                 duplicate_stream_info[user].append(duplicate_streams[user][index].ip_address)
 
-        # Do not send offense messages to Discord if the ips are in the same state and city
-        notify_stream_info = duplicate_stream_info.copy()
-        keys_to_remove = []
-        for user in notify_stream_info.keys():
-            locations = []
-            for i in range(len(notify_stream_info[user])):
-                ip_info = get_ip_info(notify_stream_info[user][i])
-                ip_location = [ip_info["regionName"], ip_info["city"]] if ip_info["status"] != "fail" else ["Unknown",
-                                                                                                            "Unknown"]
-                # Add location info to the ip string, safe now that we are done with it...
-                notify_stream_info[user][i] = {
-                    notify_stream_info[user][i]: {"state": ip_location[0], "city": ip_location[1]}}
-                if ip_location in locations:
-                    continue
-                else:
-                    locations.append(ip_location)
+    return duplicate_stream_info
 
-            # Check if all locations are the same. If they are, continue to log but do not notify on discord
-            if all(i == locations[0] for i in locations):
-                keys_to_remove.append(user)
 
-        # Now, remove the keys that need to be deleted
-        for user in keys_to_remove:
-            del notify_stream_info[user]
-        if notify_stream_info:
-            def pretty_discord(data):
-                pretty_data = []
-                for name, ips in data.items():
-                    location_list = ""
-                    for index, ip in enumerate(ips):
-                        location = list(ip.values())[0]
-                        if index == len(ips) - 1:
-                            location_list += f"- {location['city']}, {location['state']}"
-                        else:
-                            location_list += f"- {location['city']}, {location['state']}\n"
-                    pretty_data.append(
-                        {
-                            "name": name,
-                            "value": location_list,
-                            "inline": False
-                        }
-                    )
-                discord_msg = {
-                    "embeds": [
-                        {
-                            "title": "Concurrent Stream Info",
-                            "color": 16711680,
-                            "timestamp": f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]}+00:00",
-                            "thumbnail": {
-                                "url": TAUTULLI_ICON
-                            },
-                            "fields": [data for data in pretty_data]
-                        }
-                    ]
-                }
-                return discord_msg
+def new_ip_address(ip):
+    ip_info = get_ip_info(ip)
+    if ip_info["status"] == "fail":
+        return {
+            "count": 1,
+            "location": {
+                "state": "Unknown",
+                "city": "Unknown"
+            },
+            "isp": "Unknown",
+            "offence_dates": [time.time()]
+        }
+    return {
+        "count": 1,
+        "location": {
+            "state": ip_info["regionName"],
+            "city": ip_info["city"]
+        },
+        "isp": ip_info["isp"],
+        "offence_dates": [time.time()]
+    }
 
-            discord_notify(opts.webhook, pretty_discord(notify_stream_info))
-    else:
-        return
 
+def write_to_json(duplicate_stream_info):
     with open("concurrent_ips.json") as f:
         stored_data = json.load(f)
     for user, ip_list in duplicate_stream_info.items():
@@ -443,6 +375,7 @@ def handle_duplicate_streams(server):
                 ip_address = list(ip_dict.keys())[0]  # Extracting IP address
                 if ip_address in stored_data[user]["ip_addresses"]:
                     stored_data[user]["ip_addresses"][ip_address]["count"] += 1
+                    stored_data[user]["ip_addresses"][ip_address]["offence_dates"].append(time.time())
                 else:
                     stored_data[user]["ip_addresses"][ip_address] = new_ip_address(ip_address)
         else:
@@ -452,7 +385,72 @@ def handle_duplicate_streams(server):
                 stored_data[user]["ip_addresses"][ip_address] = new_ip_address(ip_address)
     with open("concurrent_ips.json", "w") as outfile:
         json.dump(stored_data, outfile, indent=4)
-    print("Done!")
+
+
+def filter_duplicate_streams(duplicate_stream_info):
+    # Do not send offense messages to Discord if the ips are in the same state and city
+    keys_to_remove = []
+    for user, streams in duplicate_stream_info.items():
+        locations = []
+        for i in range(len(streams)):
+            ip_info = get_ip_info(streams[i])
+            ip_location = [ip_info["regionName"], ip_info["city"]] if ip_info["status"] != "fail" \
+                else ["Unknown", "Unknown"]
+            # Add location info to the ip string, safe now that we are done with it...
+            streams[i] = {
+                streams[i]: {"state": ip_location[0], "city": ip_location[1]}}
+            if ip_location in locations:
+                continue
+            else:
+                locations.append(ip_location)
+
+        # Check if all locations are the same. If they are, continue to log but do not notify on discord
+        if all(i == locations[0] for i in locations):
+            keys_to_remove.append(user)
+
+    # Now, remove the keys that need to be deleted
+    for user in keys_to_remove:
+        del duplicate_stream_info[user]
+    return duplicate_stream_info
+
+
+def notify_duplicate_streams(duplicate_stream_info):
+    if duplicate_stream_info:
+        def pretty_discord(data):
+            pretty_data = []
+            for name, ips in data.items():
+                location_list = ""
+                for index, ip in enumerate(ips):
+                    location = list(ip.values())[0]
+                    if index == len(ips) - 1:
+                        location_list += f"- {location['city']}, {location['state']}"
+                    else:
+                        location_list += f"- {location['city']}, {location['state']}\n"
+                pretty_data.append(
+                    {
+                        "name": name,
+                        "value": location_list,
+                        "inline": False
+                    }
+                )
+            discord_msg = {
+                "embeds": [
+                    {
+                        "title": "Concurrent Stream Info",
+                        "color": 16711680,
+                        "timestamp": f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]}+00:00",
+                        "thumbnail": {
+                            "url": TAUTULLI_ICON
+                        },
+                        "fields": [data for data in pretty_data]
+                    }
+                ]
+            }
+            return discord_msg
+
+        discord_notify(opts.webhook, pretty_discord(duplicate_stream_info))
+    else:
+        return
 
 
 if __name__ == "__main__":
@@ -510,7 +508,11 @@ if __name__ == "__main__":
         all_streams = get_all_streams(tautulli_server, opts.userId)
 
         try:
-            handle_duplicate_streams(tautulli_server)
+            duplicate_streams = find_duplicate_streams(tautulli_server)
+            filtered_duplicate_streams = filter_duplicate_streams(duplicate_streams)
+            notify_duplicate_streams(filtered_duplicate_streams)
+            write_to_json(duplicate_streams)
+            print("Done!")
         except Exception as e:
             print(f"Exception: {e}")
             discord_notify(opts.webhook, f"Kill Stream Error: {str(e)}")
