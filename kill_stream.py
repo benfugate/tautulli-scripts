@@ -352,7 +352,7 @@ def new_ip_address(ip):
                 "city": "Unknown"
             },
             "isp": "Unknown",
-            "offence_dates": [time.time()]
+            "offence_dates": [datetime.now().isoformat()]
         }
     return {
         "count": 1,
@@ -361,7 +361,7 @@ def new_ip_address(ip):
             "city": ip_info["city"]
         },
         "isp": ip_info["isp"],
-        "offence_dates": [time.time()]
+        "offence_dates": [datetime.now().isoformat()]
     }
 
 
@@ -375,7 +375,7 @@ def write_to_json(duplicate_stream_info):
                 ip_address = list(ip_dict.keys())[0]  # Extracting IP address
                 if ip_address in stored_data[user]["ip_addresses"]:
                     stored_data[user]["ip_addresses"][ip_address]["count"] += 1
-                    stored_data[user]["ip_addresses"][ip_address]["offence_dates"].append(time.time())
+                    stored_data[user]["ip_addresses"][ip_address]["offence_dates"].append(datetime.now().isoformat())
                 else:
                     stored_data[user]["ip_addresses"][ip_address] = new_ip_address(ip_address)
         else:
