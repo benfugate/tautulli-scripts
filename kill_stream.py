@@ -305,9 +305,9 @@ def get_ip_info(ip_address):
     return get_request(f'http://ip-api.com/json/{ip_address}').json()
 
 
-def find_duplicate_streams(server):
+def find_duplicate_streams(server, filter_user_id=None):
 
-    streams = get_all_streams(server)
+    streams = get_all_streams(server, filter_user_id)
     duplicate_streams = {}
     unique_names = []
     for stream in streams:
@@ -366,8 +366,12 @@ def new_ip_address(ip):
 
 
 def write_to_json(duplicate_stream_info):
-    with open("concurrent_ips.json") as f:
-        stored_data = json.load(f)
+    try:
+        with open("concurrent_ips.json") as f:
+            stored_data = json.load(f)
+    except Exception:
+        # Initialize the datastore if the file doesn't exist or is invalid
+        stored_data = {}
     for user, ip_list in duplicate_stream_info.items():
         if user in stored_data:
             stored_data[user]["offenses"] += 1
@@ -508,10 +512,11 @@ if __name__ == "__main__":
         all_streams = get_all_streams(tautulli_server, opts.userId)
 
         try:
-            duplicate_streams = find_duplicate_streams(tautulli_server)
+            # Backwards compatible: if --userId is provided, only analyze that user; otherwise scan all users.
+            duplicate_streams = find_duplicate_streams(tautulli_server, opts.userId)
             filtered_duplicate_streams = filter_duplicate_streams(duplicate_streams)
             notify_duplicate_streams(filtered_duplicate_streams)
-            write_to_json(duplicate_streams)
+            write_to_json(filtered_duplicate_streams)
             print("Done!")
         except Exception as e:
             print(f"Exception: {e}")
